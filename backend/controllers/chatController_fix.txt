@@ -1,0 +1,77 @@
+﻿        });
+    } catch (error) {
+        console.error('Create conversation error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error creating conversation'
+        });
+    }
+};
+
+/**
+ * Update Conversation Status (Accept/Reject Request)
+ * POST /api/chat/conversations/:conversationId/status
+ */
+const updateConversationStatus = async (req, res) => {
+    try {
+        const userId = req.user._id;
+        const { conversationId } = req.params;
+        const { status } = req.body;
+
+        if (!['accepted', 'rejected'].includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid status. Must be "accepted" or "rejected"'
+            });
+        }
+
+        // Find conversation and verify user is a participant (but not the requester)
+        const conversation = await Conversation.findOne({
+            _id: conversationId,
+            'participants.userId': userId
+        });
+
+        if (!conversation) {
+            return res.status(404).json({
+                success: false,
+                message: 'Conversation not found or access denied'
+            });
+        }
+
+        // Check if user is trying to approve their own request
+        if (conversation.requestedBy.toString() === userId.toString()) {
+            return res.status(403).json({
+                success: false,
+                message: 'You cannot approve your own message request'
+            });
+        }
+
+        // Update status
+        conversation.status = status;
+        await conversation.save();
+
+        await conversation.populate('participants.userId', 'name email role');
+        await conversation.populate('requestedBy', 'name email role');
+
+        res.json({
+            success: true,
+            message: Message request ,
+            data: { conversation }
+        });
+    } catch (error) {
+        console.error('Update conversation status error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error updating conversation status'
+        });
+    }
+};
+
+module.exports = {
+    searchUsers,
+    getConversations,
+    getMessages,
+    markAsRead,
+    createConversation,
+    updateConversationStatus
+};

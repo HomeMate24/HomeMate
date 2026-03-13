@@ -1,0 +1,289 @@
+// Prisma schema for HomeMate Hub
+// Backend database design for home services platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum UserRole {
+  CLIENT
+  WORKER
+}
+
+enum JobStatus {
+  PENDING
+  ACCEPTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  REJECTED
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum PaymentType {
+  JOB_PAYMENT
+  SUBSCRIPTION
+}
+
+// Core User table with role-based authentication
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String   // bcrypt hashed
+  phone     String   @unique
+  name      String
+  role      UserRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations (one-to-one based on role)
+  client Client?
+  worker Worker?
+
+  @@index([email])
+  @@index([role])
+}
+
+// Client-specific profile
+model Client {
+  id           String        @id @default(uuid())
+  userId       String        @unique
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  address      String?
+  areaId       String?
+  area         Area?         @relation(fields: [areaId], references: [id])
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // Relations
+  jobs         Job[]
+  ratings      Rating[]
+  payments     Payment[]
+  subscription Subscription?
+  aiAccessLogs AIAccessLog[]
+
+  @@index([areaId])
+}
+
+// Worker-specific profile
+model Worker {
+  id              String       @id @default(uuid())
+  userId          String       @unique
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio             String?
+  profileImage    String?
+  experience      Int?         // years of experience
+  hourlyRate      Float?
+  isAvailable     Boolean      @default(true)
+  totalJobs       Int          @default(0)
+  completedJobs   Int          @default(0)
+  averageRating   Float        @default(0.0)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relations
+  workerAreas  WorkerArea[]
+  workerServices WorkerService[]
+  jobs         Job[]
+  ratings      Rating[]
+
+  @@index([isAvailable])
+  @@index([averageRating])
+}
+
+// Geographic areas where services are available
+model Area {
+  id        String   @id @default(uuid())
+  name      String   @unique // e.g., "Kothrud", "Warje", "Erandwane"
+  city      String   @default("Pune")
+  pincode   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  workerAreas WorkerArea[]
+  clients     Client[]
+  jobs        Job[]
+
+  @@index([name])
+}
+
+// Many-to-many: Workers can work in multiple areas
+model WorkerArea {
+  id        String   @id @default(uuid())
+  workerId  String
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  areaId    String
+  area      Area     @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([workerId, areaId])
+  @@index([workerId])
+  @@index([areaId])
+}
+
+// Service catalog (Plumbing, Carpentry, etc.)
+model Service {
+  id          String   @id @default(uuid())
+  name        String   @unique // e.g., "Plumbing", "Carpentry"
+  description String?
+  icon        String?  // icon URL or identifier
+  isActive    Boolean  @default(true)
+  basePrice   Float?   // base price for reference
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  workerServices WorkerService[]
+  jobs           Job[]
+
+  @@index([name])
+}
+
+// Many-to-many: Workers can offer multiple services
+model WorkerService {
+  id        String   @id @default(uuid())
+  workerId  String
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  serviceId String
+  service   Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([workerId, serviceId])
+  @@index([workerId])
+  @@index([serviceId])
+}
+
+// Job/Booking entity
+model Job {
+  id                String    @id @default(uuid())
+  clientId          String
+  client            Client    @relation(fields: [clientId], references: [id])
+  workerId          String?
+  worker            Worker?   @relation(fields: [workerId], references: [id])
+  serviceId         String
+  service           Service   @relation(fields: [serviceId], references: [id])
+  areaId            String
+  area              Area      @relation(fields: [areaId], references: [id])
+  
+  description       String
+  scheduledAt       DateTime  // must be within 24 hours
+  address           String
+  status            JobStatus @default(PENDING)
+  estimatedPrice    Float
+  finalPrice        Float?
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  acceptedAt        DateTime?
+  completedAt       DateTime?
+
+  // Relations
+  payment Payment?
+  rating  Rating?
+
+  @@index([clientId])
+  @@index([workerId])
+  @@index([areaId])
+  @@index([serviceId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+// Rating and Review system
+model Rating {
+  id        String   @id @default(uuid())
+  jobId     String   @unique
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id])
+  workerId  String
+  worker    Worker   @relation(fields: [workerId], references: [id])
+  
+  rating    Int      // 1-5 stars
+  review    String?
+  createdAt DateTime @default(now())
+
+  @@index([workerId])
+  @@index([rating])
+}
+
+// Payment transactions
+model Payment {
+  id              String        @id @default(uuid())
+  clientId        String
+  client          Client        @relation(fields: [clientId], references: [id])
+  jobId           String?       @unique
+  job             Job?          @relation(fields: [jobId], references: [id])
+  subscriptionId  String?       @unique
+  subscription    Subscription? @relation(fields: [subscriptionId], references: [id])
+  
+  amount          Float
+  paymentType     PaymentType
+  status          PaymentStatus @default(PENDING)
+  paymentMethod   String?       // "UPI", "NET_BANKING"
+  transactionId   String?       @unique
+  paymentGatewayResponse Json?
+  
+  createdAt       DateTime      @default(now())
+  completedAt     DateTime?
+
+  @@index([clientId])
+  @@index([status])
+  @@index([transactionId])
+}
+
+// Subscription for AI access
+model Subscription {
+  id              String        @id @default(uuid())
+  clientId        String        @unique
+  client          Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  
+  plan            String        @default("monthly") // "monthly"
+  price           Float         @default(49.0)
+  isActive        Boolean       @default(false)
+  aiAccessEnabled Boolean       @default(false)
+  
+  startDate       DateTime?
+  endDate         DateTime?
+  autoRenew       Boolean       @default(true)
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Relations
+  payment Payment?
+
+  @@index([clientId])
+  @@index([isActive])
+  @@index([endDate])
+}
+
+// AI Access audit log
+model AIAccessLog {
+  id            String   @id @default(uuid())
+  clientId      String
+  client        Client   @relation(fields: [clientId], references: [id])
+  
+  requestType   String   // "WORKER_RECOMMENDATION"
+  requestData   Json
+  responseData  Json?
+  
+  createdAt     DateTime @default(now())
+
+  @@index([clientId])
+  @@index([createdAt])
+}
