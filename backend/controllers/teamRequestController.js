@@ -4,49 +4,29 @@ const Worker = require('../models/Worker');
 const User = require('../models/User');
 const { sendToUser } = require('../websocket/websocket');
 
-/**
- * Send Team Invitation
- * POST /api/team-requests/send
- */
 const sendTeamRequest = async (req, res) => {
     try {
         const providerId = req.user._id;
         const { userId, requestType, message } = req.body;
 
-        // Validation
         if (!userId || !requestType) {
-            return res.status(400).json({
-                success: false,
-                message: 'User ID and request type are required'
-            });
+            return res.status(400).json({ success: false, message: 'User ID and request type are required' });
         }
 
         if (!['WORKER', 'CLIENT'].includes(requestType)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid request type. Must be WORKER or CLIENT'
-            });
+            return res.status(400).json({ success: false, message: 'Invalid request type. Must be WORKER or CLIENT' });
         }
 
-        // Get provider
         const provider = await Provider.findOne({ userId: providerId });
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Check if target user exists
         const targetUser = await User.findById(userId);
         if (!targetUser) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
+            return res.status(404).json({ success: false, message: 'User not found' });
         }
 
-        // Check for existing pending request
         const existingRequest = await TeamRequest.findOne({
             providerId: provider._id,
             userId,
@@ -54,13 +34,9 @@ const sendTeamRequest = async (req, res) => {
         });
 
         if (existingRequest) {
-            return res.status(409).json({
-                success: false,
-                message: 'A pending request already exists for this user'
-            });
+            return res.status(409).json({ success: false, message: 'A pending request already exists for this user' });
         }
 
-        // Create team request
         const teamRequest = await TeamRequest.create({
             providerId: provider._id,
             userId,
@@ -69,245 +45,131 @@ const sendTeamRequest = async (req, res) => {
             status: 'PENDING'
         });
 
-        await teamRequest.populate('providerId userId');
+        await TeamRequest.populate(teamRequest, ['providerId', 'userId']);
 
-        // Get provider user details
         const providerUser = await User.findById(providerId);
 
-        // Send real-time notification to the user
         sendToUser(userId.toString(), {
             type: 'TEAM_REQUEST',
-            request: teamRequest.toObject(),
+            request: teamRequest,
             providerName: providerUser.name
         });
 
-        res.status(201).json({
-            success: true,
-            message: 'Team invitation sent successfully',
-            data: { request: teamRequest }
-        });
+        res.status(201).json({ success: true, message: 'Team invitation sent successfully', data: { request: teamRequest } });
     } catch (error) {
         console.error('Send team request error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error sending team invitation'
-        });
+        res.status(500).json({ success: false, message: 'Error sending team invitation' });
     }
 };
 
-/**
- * Get Pending Requests for Current User
- * GET /api/team-requests/pending
- */
 const getPendingRequests = async (req, res) => {
     try {
         const userId = req.user._id;
+        const requests = await TeamRequest.find({ userId, status: 'PENDING' });
+        await TeamRequest.populateMany(requests, ['providerId', 'userId']);
 
-        const requests = await TeamRequest.find({
-            userId,
-            status: 'PENDING'
-        })
-            .populate('providerId')
-            .populate({
-                path: 'providerId',
-                populate: {
-                    path: 'userId',
-                    select: 'name email phone'
-                }
-            })
-            .sort({ createdAt: -1 })
-            .lean();
-
-        res.json({
-            success: true,
-            data: { requests }
-        });
+        res.json({ success: true, data: { requests } });
     } catch (error) {
         console.error('Get pending requests error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching pending requests'
-        });
+        res.status(500).json({ success: false, message: 'Error fetching pending requests' });
     }
 };
 
-/**
- * Accept Team Request
- * POST /api/team-requests/:requestId/accept
- */
 const acceptTeamRequest = async (req, res) => {
     try {
         const userId = req.user._id;
         const { requestId } = req.params;
 
-        // Find the request
-        const request = await TeamRequest.findOne({
-            _id: requestId,
-            userId,
-            status: 'PENDING'
-        });
-
+        const request = await TeamRequest.findOne({ _id: requestId, userId, status: 'PENDING' });
         if (!request) {
-            return res.status(404).json({
-                success: false,
-                message: 'Request not found or already processed'
-            });
+            return res.status(404).json({ success: false, message: 'Request not found or already processed' });
         }
 
-        // Update request status
-        request.status = 'ACCEPTED';
-        request.respondedAt = new Date();
-        await request.save();
+        await TeamRequest.updateById(request._id, { status: 'ACCEPTED', respondedAt: new Date() });
 
-        // If request type is WORKER, update the worker's providerId
         if (request.requestType === 'WORKER') {
             const worker = await Worker.findOne({ userId });
-
             if (worker) {
-                worker.providerId = request.providerId;
-                await worker.save();
-
-                // Update provider's worker count
-                await Provider.findByIdAndUpdate(request.providerId, {
-                    $inc: { totalWorkers: 1 }
-                });
+                await Worker.updateById(worker._id, { providerId: request.providerId || request.provider_id });
+                await Provider.increment(request.providerId || request.provider_id, 'totalWorkers', 1);
             } else {
-                // Create worker profile if doesn't exist
                 await Worker.create({
                     userId,
-                    providerId: request.providerId,
+                    providerId: request.providerId || request.provider_id,
                     bio: '',
                     experience: 0,
                     hourlyRate: 0
                 });
+                await Provider.increment(request.providerId || request.provider_id, 'totalWorkers', 1);
+            }
+        }
 
-                await Provider.findByIdAndUpdate(request.providerId, {
-                    $inc: { totalWorkers: 1 }
+        const provider = await Provider.findById(request.providerId || request.provider_id);
+        if (provider) {
+            const providerUser = await User.findById(provider.user_id || provider.userId);
+            if (providerUser) {
+                sendToUser(providerUser._id.toString(), {
+                    type: 'TEAM_REQUEST_ACCEPTED',
+                    request,
+                    userId: userId.toString()
                 });
             }
         }
 
-        // Get provider user for notification
-        const provider = await Provider.findById(request.providerId).populate('userId');
-
-        // Send real-time notification to provider
-        if (provider && provider.userId) {
-            sendToUser(provider.userId._id.toString(), {
-                type: 'TEAM_REQUEST_ACCEPTED',
-                request: request.toObject(),
-                userId: userId.toString()
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'Team request accepted',
-            data: { request }
-        });
+        res.json({ success: true, message: 'Team request accepted', data: { request } });
     } catch (error) {
         console.error('Accept team request error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error accepting team request'
-        });
+        res.status(500).json({ success: false, message: 'Error accepting team request' });
     }
 };
 
-/**
- * Reject Team Request
- * POST /api/team-requests/:requestId/reject
- */
 const rejectTeamRequest = async (req, res) => {
     try {
         const userId = req.user._id;
         const { requestId } = req.params;
 
-        // Find the request
-        const request = await TeamRequest.findOne({
-            _id: requestId,
-            userId,
-            status: 'PENDING'
-        });
-
+        const request = await TeamRequest.findOne({ _id: requestId, userId, status: 'PENDING' });
         if (!request) {
-            return res.status(404).json({
-                success: false,
-                message: 'Request not found or already processed'
-            });
+            return res.status(404).json({ success: false, message: 'Request not found or already processed' });
         }
 
-        // Update request status
-        request.status = 'REJECTED';
-        request.respondedAt = new Date();
-        await request.save();
+        await TeamRequest.updateById(request._id, { status: 'REJECTED', respondedAt: new Date() });
 
-        // Get provider user for notification
-        const provider = await Provider.findById(request.providerId).populate('userId');
-
-        // Send real-time notification to provider
-        if (provider && provider.userId) {
-            sendToUser(provider.userId._id.toString(), {
-                type: 'TEAM_REQUEST_REJECTED',
-                request: request.toObject(),
-                userId: userId.toString()
-            });
+        const provider = await Provider.findById(request.providerId || request.provider_id);
+        if (provider) {
+            const providerUser = await User.findById(provider.user_id || provider.userId);
+            if (providerUser) {
+                sendToUser(providerUser._id.toString(), {
+                    type: 'TEAM_REQUEST_REJECTED',
+                    request,
+                    userId: userId.toString()
+                });
+            }
         }
 
-        res.json({
-            success: true,
-            message: 'Team request rejected',
-            data: { request }
-        });
+        res.json({ success: true, message: 'Team request rejected', data: { request } });
     } catch (error) {
         console.error('Reject team request error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error rejecting team request'
-        });
+        res.status(500).json({ success: false, message: 'Error rejecting team request' });
     }
 };
 
-/**
- * Get Sent Requests (for providers)
- * GET /api/team-requests/sent
- */
 const getSentRequests = async (req, res) => {
     try {
         const userId = req.user._id;
-
-        // Get provider
         const provider = await Provider.findOne({ userId });
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        const requests = await TeamRequest.find({
-            providerId: provider._id
-        })
-            .populate('userId', 'name email phone')
-            .sort({ createdAt: -1 })
-            .lean();
+        const requests = await TeamRequest.find({ providerId: provider._id });
+        await TeamRequest.populateMany(requests, ['userId']);
 
-        res.json({
-            success: true,
-            data: { requests }
-        });
+        res.json({ success: true, data: { requests } });
     } catch (error) {
         console.error('Get sent requests error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching sent requests'
-        });
+        res.status(500).json({ success: false, message: 'Error fetching sent requests' });
     }
 };
 
-module.exports = {
-    sendTeamRequest,
-    getPendingRequests,
-    acceptTeamRequest,
-    rejectTeamRequest,
-    getSentRequests
-};
+module.exports = { sendTeamRequest, getPendingRequests, acceptTeamRequest, rejectTeamRequest, getSentRequests };

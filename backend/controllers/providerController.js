@@ -4,58 +4,28 @@ const User = require('../models/User');
 const Job = require('../models/Job');
 const bcrypt = require('bcryptjs');
 
-/**
- * Get Provider Dashboard Stats
- * GET /api/provider/dashboard
- */
 const getDashboardStats = async (req, res) => {
     try {
         const userId = req.user._id;
-
-        // Get provider data
         const provider = await Provider.findOne({ userId });
 
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Get workers count
         const workersCount = await Worker.countDocuments({ providerId: provider._id });
+        const workers = await Worker.find({ providerId: provider._id }, { select: 'id' });
+        const workerIds = workers.map(w => w._id || w.id);
 
-        // Get jobs for this provider's workers
-        const workers = await Worker.find({ providerId: provider._id }).select('_id');
-        const workerIds = workers.map(w => w._id);
+        let totalBookings = 0, completedJobs = 0, totalRevenue = 0;
 
-        const totalBookings = await Job.countDocuments({ workerId: { $in: workerIds } });
-        const completedJobs = await Job.countDocuments({
-            workerId: { $in: workerIds },
-            status: 'COMPLETED'
-        });
-        const activeWorkers = await Worker.countDocuments({
-            providerId: provider._id,
-            isAvailable: true
-        });
+        if (workerIds.length > 0) {
+            totalBookings = await Job.countDocuments({ workerIdIn: workerIds });
+            completedJobs = await Job.countDocuments({ workerIdIn: workerIds, status: 'COMPLETED' });
+            totalRevenue = await Job.sumEstimatedPrice(workerIds);
+        }
 
-        // Calculate total revenue from completed jobs
-        const revenueData = await Job.aggregate([
-            {
-                $match: {
-                    workerId: { $in: workerIds },
-                    status: 'COMPLETED'
-                }
-            },
-            {
-                $group: {
-                    _id: null,
-                    total: { $sum: '$estimatedPrice' }
-                }
-            }
-        ]);
-
-        const totalRevenue = revenueData.length > 0 ? revenueData[0].total : 0;
+        const activeWorkers = await Worker.countDocuments({ providerId: provider._id, isAvailable: true });
 
         res.json({
             success: true,
@@ -64,142 +34,80 @@ const getDashboardStats = async (req, res) => {
                 totalBookings,
                 completedJobs,
                 activeWorkers,
-                revenueChange: '+0%', // TODO: Calculate change from last month
+                revenueChange: '+0%',
                 bookingsChange: '+0%',
                 jobsChange: '+0%',
-                workersChange: `+0`
+                workersChange: '+0'
             }
         });
     } catch (error) {
         console.error('Get dashboard stats error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching dashboard stats'
-        });
+        res.status(500).json({ success: false, message: 'Error fetching dashboard stats' });
     }
 };
 
-/**
- * Get Provider's Workers
- * GET /api/provider/workers
- */
 const getWorkers = async (req, res) => {
     try {
         const userId = req.user._id;
-
-        // Get provider
         const provider = await Provider.findOne({ userId });
 
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Get all workers for this provider
-        const workers = await Worker.find({ providerId: provider._id })
-            .populate('userId', 'name email phone')
-            .populate('areaIds', 'name city')
-            .populate('serviceIds', 'name icon')
-            .sort({ createdAt: -1 })
-            .lean();
+        const workers = await Worker.find({ providerId: provider._id });
 
-        // Transform data for frontend
+        for (const worker of workers) {
+            await Worker.populate(worker, ['userId', 'areaIds', 'serviceIds']);
+        }
+
         const transformedWorkers = workers.map(worker => ({
             id: worker._id,
             name: worker.userId?.name || 'Unknown',
             email: worker.userId?.email,
             phone: worker.userId?.phone,
-            role: worker.serviceIds?.map(s => s.name).join(', ') || 'General',
+            role: Array.isArray(worker.serviceIds) ? worker.serviceIds.map(s => s.name).join(', ') : 'General',
             bio: worker.bio,
             experience: worker.experience,
-            hourlyRate: worker.hourlyRate,
-            rating: worker.averageRating || 0,
-            jobs: worker.completedJobs || 0,
-            status: worker.isAvailable ? 'active' : 'inactive',
+            hourlyRate: worker.hourlyRate || worker.hourly_rate,
+            rating: worker.averageRating || worker.average_rating || 0,
+            jobs: worker.completedJobs || worker.completed_jobs || 0,
+            status: (worker.isAvailable !== undefined ? worker.isAvailable : worker.is_available) ? 'active' : 'inactive',
             areas: worker.areaIds || [],
             services: worker.serviceIds || []
         }));
 
-        res.json({
-            success: true,
-            data: {
-                workers: transformedWorkers
-            }
-        });
+        res.json({ success: true, data: { workers: transformedWorkers } });
     } catch (error) {
         console.error('Get workers error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching workers'
-        });
+        res.status(500).json({ success: false, message: 'Error fetching workers' });
     }
 };
 
-/**
- * Add Worker to Provider's Team
- * POST /api/provider/workers
- */
 const addWorker = async (req, res) => {
     try {
         const userId = req.user._id;
-        const {
-            name,
-            email,
-            phone,
-            password,
-            bio,
-            experience,
-            hourlyRate,
-            areaIds,
-            serviceIds
-        } = req.body;
+        const { name, email, phone, password, bio, experience, hourlyRate, areaIds, serviceIds } = req.body;
 
-        // Validation
         if (!name || !email || !phone) {
-            return res.status(400).json({
-                success: false,
-                message: 'Name, email, and phone are required'
-            });
+            return res.status(400).json({ success: false, message: 'Name, email, and phone are required' });
         }
 
-        // Get provider
         const provider = await Provider.findOne({ userId });
-
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Check if user already exists
-        const existingUser = await User.findOne({
-            $or: [{ email }, { phone }]
-        });
-
+        const existingUser = await User.findOne({ $or: [{ email }, { phone }] });
         if (existingUser) {
-            return res.status(409).json({
-                success: false,
-                message: 'User with this email or phone already exists'
-            });
+            return res.status(409).json({ success: false, message: 'User with this email or phone already exists' });
         }
 
-        // Generate password if not provided
         const workerPassword = password || Math.random().toString(36).slice(-8);
         const hashedPassword = await bcrypt.hash(workerPassword, 10);
 
-        // Create user
-        const user = await User.create({
-            email,
-            password: hashedPassword,
-            name,
-            phone,
-            role: 'WORKER'
-        });
+        const user = await User.create({ email, password: hashedPassword, name, phone, role: 'WORKER' });
 
-        // Create worker profile with provider reference
         const worker = await Worker.create({
             userId: user._id,
             bio: bio || '',
@@ -210,283 +118,191 @@ const addWorker = async (req, res) => {
             providerId: provider._id
         });
 
-        // Populate for response
-        await worker.populate('userId areaIds serviceIds');
+        await Worker.populate(worker, ['userId', 'areaIds', 'serviceIds']);
+        await Provider.increment(provider._id, 'totalWorkers', 1);
 
-        // Update provider's worker count
-        await Provider.findByIdAndUpdate(provider._id, {
-            $inc: { totalWorkers: 1 }
-        });
-
-        // Prepare response
         const workerResponse = {
             id: worker._id,
             name: user.name,
             email: user.email,
             phone: user.phone,
-            role: worker.serviceIds?.map(s => s.name).join(', ') || 'General',
+            role: Array.isArray(worker.serviceIds) ? worker.serviceIds.map(s => s.name).join(', ') : 'General',
             bio: worker.bio,
             experience: worker.experience,
-            hourlyRate: worker.hourlyRate,
+            hourlyRate: worker.hourlyRate || worker.hourly_rate,
             rating: 0,
             jobs: 0,
             status: 'active',
             areas: worker.areaIds || [],
             services: worker.serviceIds || [],
-            temporaryPassword: password ? undefined : workerPassword // Only send if auto-generated
+            temporaryPassword: password ? undefined : workerPassword
         };
 
-        res.status(201).json({
-            success: true,
-            message: 'Worker added successfully',
-            data: {
-                worker: workerResponse
-            }
-        });
+        res.status(201).json({ success: true, message: 'Worker added successfully', data: { worker: workerResponse } });
     } catch (error) {
         console.error('Add worker error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error adding worker'
-        });
+        res.status(500).json({ success: false, message: 'Error adding worker' });
     }
 };
 
-/**
- * Get Provider Bookings
- * GET /api/provider/bookings
- */
 const getBookings = async (req, res) => {
     try {
         const userId = req.user._id;
-
-        // Get provider
         const provider = await Provider.findOne({ userId });
 
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Get all workers for this provider
-        const workers = await Worker.find({ providerId: provider._id }).select('_id');
-        const workerIds = workers.map(w => w._id);
+        const workers = await Worker.find({ providerId: provider._id }, { select: 'id' });
+        const workerIds = workers.map(w => w._id || w.id);
 
-        // Get jobs for these workers
-        const jobs = await Job.find({ workerId: { $in: workerIds } })
-            .populate('clientId', 'userId')
-            .populate('workerId', 'userId')
-            .populate('serviceId', 'name')
-            .sort({ createdAt: -1 })
-            .limit(50)
-            .lean();
+        if (workerIds.length === 0) {
+            return res.json({ success: true, data: { bookings: [] } });
+        }
 
-        // Get user details for clients and workers
+        const jobs = await Job.find({ workerIdIn: workerIds }, { orderBy: ['createdAt', 'desc'], limit: 50 });
+
         const jobsWithDetails = await Promise.all(jobs.map(async (job) => {
-            const clientUser = job.clientId?.userId ? await User.findById(job.clientId.userId).select('name').lean() : null;
-            const workerUser = job.workerId?.userId ? await User.findById(job.workerId.userId).select('name').lean() : null;
+            // Get client user name
+            let clientName = 'Unknown Client';
+            if (job.client_id || job.clientId) {
+                const Client = require('../models/Client');
+                const client = await Client.findById(job.client_id || job.clientId);
+                if (client) {
+                    const clientUser = await User.findById(client.user_id);
+                    if (clientUser) clientName = clientUser.name;
+                }
+            }
 
+            // Get worker user name
+            let workerName = 'Unassigned';
+            if (job.worker_id || job.workerId) {
+                const w = await Worker.findById(job.worker_id || job.workerId);
+                if (w) {
+                    const wUser = await User.findById(w.user_id);
+                    if (wUser) workerName = wUser.name;
+                }
+            }
+
+            // Get service name
+            let serviceName = 'Unknown Service';
+            if (job.service_id || job.serviceId) {
+                const Service = require('../models/Service');
+                const service = await Service.findById(job.service_id || job.serviceId);
+                if (service) serviceName = service.name;
+            }
+
+            const scheduledAt = job.scheduled_at || job.scheduledAt;
             return {
                 id: job._id,
-                client: clientUser?.name || 'Unknown Client',
-                service: job.serviceId?.name || 'Unknown Service',
-                worker: workerUser?.name || 'Unassigned',
-                amount: `₹${job.estimatedPrice || 0}`,
-                date: new Date(job.scheduledAt).toLocaleDateString(),
-                time: new Date(job.scheduledAt).toLocaleTimeString(),
+                client: clientName,
+                service: serviceName,
+                worker: workerName,
+                amount: `₹${job.estimated_price || job.estimatedPrice || 0}`,
+                date: new Date(scheduledAt).toLocaleDateString(),
+                time: new Date(scheduledAt).toLocaleTimeString(),
                 status: job.status.toLowerCase()
             };
         }));
 
-        res.json({
-            success: true,
-            data: {
-                bookings: jobsWithDetails
-            }
-        });
+        res.json({ success: true, data: { bookings: jobsWithDetails } });
     } catch (error) {
         console.error('Get bookings error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching bookings'
-        });
+        res.status(500).json({ success: false, message: 'Error fetching bookings' });
     }
 };
 
-/**
- * Update Worker Details
- * PUT /api/provider/workers/:workerId
- */
 const updateWorker = async (req, res) => {
     try {
         const userId = req.user._id;
         const { workerId } = req.params;
-        const {
-            bio,
-            experience,
-            hourlyRate,
-            areaIds,
-            serviceIds
-        } = req.body;
+        const { bio, experience, hourlyRate, areaIds, serviceIds } = req.body;
 
-        // Get provider
         const provider = await Provider.findOne({ userId });
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Find worker and verify it belongs to this provider
-        const worker = await Worker.findOne({
-            _id: workerId,
-            providerId: provider._id
-        });
-
+        const worker = await Worker.findOne({ _id: workerId, providerId: provider._id });
         if (!worker) {
-            return res.status(404).json({
-                success: false,
-                message: 'Worker not found or does not belong to your team'
-            });
+            return res.status(404).json({ success: false, message: 'Worker not found or does not belong to your team' });
         }
 
-        // Update worker fields
-        if (bio !== undefined) worker.bio = bio;
-        if (experience !== undefined) worker.experience = experience;
-        if (hourlyRate !== undefined) worker.hourlyRate = hourlyRate;
-        if (areaIds !== undefined) worker.areaIds = areaIds;
-        if (serviceIds !== undefined) worker.serviceIds = serviceIds;
+        const updates = {};
+        if (bio !== undefined) updates.bio = bio;
+        if (experience !== undefined) updates.experience = experience;
+        if (hourlyRate !== undefined) updates.hourlyRate = hourlyRate;
 
-        await worker.save();
-        await worker.populate('userId areaIds serviceIds');
+        if (Object.keys(updates).length > 0) {
+            await Worker.updateById(workerId, updates);
+        }
+        if (areaIds !== undefined) await Worker.setAreaIds(workerId, areaIds);
+        if (serviceIds !== undefined) await Worker.setServiceIds(workerId, serviceIds);
 
-        res.json({
-            success: true,
-            message: 'Worker updated successfully',
-            data: { worker }
-        });
+        const updatedWorker = await Worker.findById(workerId);
+        await Worker.populate(updatedWorker, ['userId', 'areaIds', 'serviceIds']);
+
+        res.json({ success: true, message: 'Worker updated successfully', data: { worker: updatedWorker } });
     } catch (error) {
         console.error('Update worker error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error updating worker'
-        });
+        res.status(500).json({ success: false, message: 'Error updating worker' });
     }
 };
 
-/**
- * Remove Worker from Team
- * DELETE /api/provider/workers/:workerId
- */
 const removeWorker = async (req, res) => {
     try {
         const userId = req.user._id;
         const { workerId } = req.params;
 
-        // Get provider
         const provider = await Provider.findOne({ userId });
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Find worker and verify it belongs to this provider
-        const worker = await Worker.findOne({
-            _id: workerId,
-            providerId: provider._id
-        });
-
+        const worker = await Worker.findOne({ _id: workerId, providerId: provider._id });
         if (!worker) {
-            return res.status(404).json({
-                success: false,
-                message: 'Worker not found or does not belong to your team'
-            });
+            return res.status(404).json({ success: false, message: 'Worker not found or does not belong to your team' });
         }
 
-        // Remove provider association (soft delete)
-        worker.providerId = null;
-        await worker.save();
+        await Worker.updateById(workerId, { providerId: null });
+        await Provider.increment(provider._id, 'totalWorkers', -1);
 
-        // Update provider's worker count
-        await Provider.findByIdAndUpdate(provider._id, {
-            $inc: { totalWorkers: -1 }
-        });
-
-        res.json({
-            success: true,
-            message: 'Worker removed from team'
-        });
+        res.json({ success: true, message: 'Worker removed from team' });
     } catch (error) {
         console.error('Remove worker error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error removing worker'
-        });
+        res.status(500).json({ success: false, message: 'Error removing worker' });
     }
 };
 
-/**
- * Update Worker Status/Availability
- * PATCH /api/provider/workers/:workerId/status
- */
 const updateWorkerStatus = async (req, res) => {
     try {
         const userId = req.user._id;
         const { workerId } = req.params;
         const { isAvailable } = req.body;
 
-        // Get provider
         const provider = await Provider.findOne({ userId });
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found'
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found' });
         }
 
-        // Find worker and verify it belongs to this provider
-        const worker = await Worker.findOne({
-            _id: workerId,
-            providerId: provider._id
-        });
-
+        const worker = await Worker.findOne({ _id: workerId, providerId: provider._id });
         if (!worker) {
-            return res.status(404).json({
-                success: false,
-                message: 'Worker not found or does not belong to your team'
-            });
+            return res.status(404).json({ success: false, message: 'Worker not found or does not belong to your team' });
         }
 
-        // Update availability
         if (isAvailable !== undefined) {
-            worker.isAvailable = isAvailable;
+            await Worker.updateById(workerId, { isAvailable });
         }
 
-        await worker.save();
-
-        res.json({
-            success: true,
-            message: 'Worker status updated',
-            data: { worker }
-        });
+        const updated = await Worker.findById(workerId);
+        res.json({ success: true, message: 'Worker status updated', data: { worker: updated } });
     } catch (error) {
         console.error('Update worker status error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error updating worker status'
-        });
+        res.status(500).json({ success: false, message: 'Error updating worker status' });
     }
 };
 
-/**
- * Cancel a booking (Provider cancels a job for their worker)
- * POST /api/provider/bookings/:jobId/cancel
- */
 const cancelBooking = async (req, res) => {
     try {
         const userId = req.user._id;
@@ -502,8 +318,7 @@ const cancelBooking = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Job not found' });
         }
 
-        // Verify the job's worker belongs to this provider
-        const workerBelongs = await Worker.findOne({ _id: job.workerId, providerId: provider._id });
+        const workerBelongs = await Worker.findOne({ _id: job.worker_id || job.workerId, providerId: provider._id });
         if (!workerBelongs) {
             return res.status(403).json({ success: false, message: 'This job does not belong to your team' });
         }
@@ -513,8 +328,7 @@ const cancelBooking = async (req, res) => {
             return res.status(400).json({ success: false, message: `Job cannot be cancelled from status ${job.status}` });
         }
 
-        job.status = 'CANCELLED';
-        await job.save();
+        await Job.updateById(jobId, { status: 'CANCELLED' });
 
         res.json({ success: true, message: 'Booking cancelled successfully' });
     } catch (error) {
@@ -523,13 +337,4 @@ const cancelBooking = async (req, res) => {
     }
 };
 
-module.exports = {
-    getDashboardStats,
-    getWorkers,
-    addWorker,
-    getBookings,
-    cancelBooking,
-    updateWorker,
-    removeWorker,
-    updateWorkerStatus
-};
+module.exports = { getDashboardStats, getWorkers, addWorker, getBookings, cancelBooking, updateWorker, removeWorker, updateWorkerStatus };

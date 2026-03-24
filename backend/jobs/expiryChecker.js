@@ -2,53 +2,51 @@ const Job = require('../models/Job');
 const Client = require('../models/Client');
 const { sendToUser } = require('../websocket/websocket');
 
-/**
- * Background job to check for expired service requests
- * Runs every minute to check jobs that have expired
- */
 const checkExpiredJobs = async () => {
     try {
         const now = new Date();
 
-        // Find jobs that are accepted, not completed, not expired, and past their expiry time
+        // Find expired accepted jobs
         const expiredJobs = await Job.find({
             status: 'ACCEPTED',
             expired: false,
-            expiresAt: { $lte: now }
-        }).populate('clientId workerId');
+            expiresAtLte: now
+        });
 
         for (const job of expiredJobs) {
             // Mark job as expired
-            job.expired = true;
-            job.status = 'CANCELLED';
-            await job.save();
+            await Job.updateById(job._id, { expired: true, status: 'CANCELLED' });
 
-            // Decrease client rating by 0.5
-            const client = await Client.findById(job.clientId);
-            if (client) {
-                client.rating = Math.max(0, client.rating - 0.5);
-                await client.save();
+            // Decrease client rating
+            const clientId = job.client_id || job.clientId;
+            if (clientId) {
+                const client = await Client.findById(clientId);
+                if (client) {
+                    const currentRating = client.rating || 0;
+                    await Client.updateById(clientId, { rating: Math.max(0, currentRating - 0.5) });
+                }
             }
 
-            // Notify both client and worker
-            const jobObj = await Job.findById(job._id)
-                .populate('clientId workerId serviceId areaId')
-                .lean();
+            // Get full job data for notification
+            const fullJob = await Job.findById(job._id);
+            await Job.populate(fullJob, ['all']);
 
             // Notify client
-            if (job.clientId?.userId) {
-                sendToUser(job.clientId.userId.toString(), {
+            if (fullJob.clientId?.user_id || fullJob.clientId?.userId) {
+                const clientUserId = fullJob.clientId.user_id || fullJob.clientId.userId;
+                sendToUser(clientUserId.toString(), {
                     type: 'SERVICE_REQUEST_EXPIRED',
-                    job: jobObj,
+                    job: fullJob,
                     message: 'Your service request has expired. Your rating has been decreased.'
                 });
             }
 
             // Notify worker
-            if (job.workerId?.userId) {
-                sendToUser(job.workerId.userId.toString(), {
+            if (fullJob.workerId?.user_id || fullJob.workerId?.userId) {
+                const workerUserId = fullJob.workerId.user_id || fullJob.workerId.userId;
+                sendToUser(workerUserId.toString(), {
                     type: 'SERVICE_REQUEST_EXPIRED',
-                    job: jobObj,
+                    job: fullJob,
                     message: 'Service request has expired and been cancelled.'
                 });
             }
@@ -64,9 +62,8 @@ const checkExpiredJobs = async () => {
     }
 };
 
-// Run every minute
 const startExpiryChecker = () => {
-    setInterval(checkExpiredJobs, 60 * 1000); // 60 seconds
+    setInterval(checkExpiredJobs, 60 * 1000);
     console.log('✅ Job expiry checker started - running every minute');
 };
 

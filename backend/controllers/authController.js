@@ -35,19 +35,13 @@ const verifyOtpToken = (token) => {
 // OTP ENDPOINTS
 // ═════════════════════════════════════════════════════════════════
 
-/**
- * Send OTP to email
- * POST /api/auth/send-otp
- */
 const sendOtp = async (req, res) => {
     try {
         const { email } = req.body;
-
         if (!email) {
             return res.status(400).json({ success: false, message: 'Email is required' });
         }
 
-        // Generate 6-digit OTP
         const otp = String(Math.floor(100000 + Math.random() * 900000));
 
         // Remove any old OTPs for this email
@@ -86,14 +80,9 @@ const sendOtp = async (req, res) => {
     }
 };
 
-/**
- * Verify OTP
- * POST /api/auth/verify-otp
- */
 const verifyOtp = async (req, res) => {
     try {
         const { email, otp } = req.body;
-
         if (!email || !otp) {
             return res.status(400).json({ success: false, message: 'Email and OTP are required' });
         }
@@ -108,10 +97,8 @@ const verifyOtp = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
         }
 
-        // Delete the used OTP
         await OtpCode.deleteMany({ email: email.toLowerCase() });
 
-        // Issue a short-lived token proving this email was verified
         const otpVerifiedToken = jwt.sign(
             { email: email.toLowerCase(), purpose: 'otp-verified' },
             process.env.JWT_SECRET,
@@ -126,40 +113,36 @@ const verifyOtp = async (req, res) => {
 };
 
 // ═════════════════════════════════════════════════════════════════
-// SIGNUP ENDPOINTS (now require OTP verification)
+// SIGNUP ENDPOINTS
 // ═════════════════════════════════════════════════════════════════
 
-/**
- * Client Signup
- * POST /api/auth/signup/client
- */
 const signupClient = async (req, res) => {
     try {
         const { email, password, name, phone, address, areaId, otpVerifiedToken } = req.body;
 
-        // Validation
         if (!email || !password || !name || !phone) {
             return res.status(400).json({ success: false, message: 'Email, password, name, and phone are required' });
         }
 
-        // Verify OTP token
         const verified = verifyOtpToken(otpVerifiedToken);
         if (!verified || verified.email !== email.toLowerCase() || verified.purpose !== 'otp-verified') {
             return res.status(400).json({ success: false, message: 'Email not verified. Please verify your email first.' });
         }
 
-        // Check if user already exists
         const existingUser = await User.findOne({ $or: [{ email }, { phone }] });
         if (existingUser) {
             return res.status(409).json({ success: false, message: 'User with this email or phone already exists' });
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-
         const user = await User.create({ email, password: hashedPassword, name, phone, role: 'CLIENT' });
 
         const client = await Client.create({ userId: user._id, address, areaId: areaId || null });
-        await client.populate('areaId');
+        // Populate area if present
+        if (client.area_id) {
+            const Area = require('../models/Area');
+            client.areaId = await Area.findById(client.area_id);
+        }
 
         const token = jwt.sign(
             { userId: user._id.toString(), role: user.role },
@@ -167,7 +150,7 @@ const signupClient = async (req, res) => {
             { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
         );
 
-        const userResponse = user.toObject();
+        const userResponse = { ...user };
         delete userResponse.password;
 
         res.status(201).json({
@@ -181,10 +164,6 @@ const signupClient = async (req, res) => {
     }
 };
 
-/**
- * Worker Signup
- * POST /api/auth/signup/worker
- */
 const signupWorker = async (req, res) => {
     try {
         const { email, password, name, phone, bio, experience, hourlyRate, areaIds, serviceIds, otpVerifiedToken } = req.body;
@@ -193,7 +172,6 @@ const signupWorker = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Email, password, name, and phone are required' });
         }
 
-        // Verify OTP token
         const verified = verifyOtpToken(otpVerifiedToken);
         if (!verified || verified.email !== email.toLowerCase() || verified.purpose !== 'otp-verified') {
             return res.status(400).json({ success: false, message: 'Email not verified. Please verify your email first.' });
@@ -211,7 +189,8 @@ const signupWorker = async (req, res) => {
             userId: user._id, bio, experience, hourlyRate,
             areaIds: areaIds || [], serviceIds: serviceIds || []
         });
-        await worker.populate('areaIds serviceIds');
+        // Populate areas and services
+        await Worker.populate(worker, ['areaIds', 'serviceIds']);
 
         const token = jwt.sign(
             { userId: user._id.toString(), role: user.role },
@@ -219,7 +198,7 @@ const signupWorker = async (req, res) => {
             { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
         );
 
-        const userResponse = user.toObject();
+        const userResponse = { ...user };
         delete userResponse.password;
 
         res.status(201).json({
@@ -233,10 +212,6 @@ const signupWorker = async (req, res) => {
     }
 };
 
-/**
- * Provider Signup
- * POST /api/auth/signup/provider
- */
 const signupProvider = async (req, res) => {
     try {
         const { email, password, name, phone, businessName, businessAddress, businessPhone, description, otpVerifiedToken } = req.body;
@@ -245,7 +220,6 @@ const signupProvider = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Email, password, name, phone, and business name are required' });
         }
 
-        // Verify OTP token
         const verified = verifyOtpToken(otpVerifiedToken);
         if (!verified || verified.email !== email.toLowerCase() || verified.purpose !== 'otp-verified') {
             return res.status(400).json({ success: false, message: 'Email not verified. Please verify your email first.' });
@@ -267,7 +241,7 @@ const signupProvider = async (req, res) => {
             { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
         );
 
-        const userResponse = user.toObject();
+        const userResponse = { ...user };
         delete userResponse.password;
 
         res.status(201).json({
@@ -285,25 +259,18 @@ const signupProvider = async (req, res) => {
 // LOGIN
 // ═════════════════════════════════════════════════════════════════
 
-/**
- * Login
- * POST /api/auth/login
- */
 const login = async (req, res) => {
     try {
         const { email, password } = req.body;
-
         if (!email || !password) {
             return res.status(400).json({ success: false, message: 'Email and password are required' });
         }
 
         const user = await User.findOne({ email });
-
         if (!user) {
             return res.status(401).json({ success: false, message: 'Invalid email or password' });
         }
 
-        // Google-only users can't login with password
         if (!user.password) {
             return res.status(401).json({ success: false, message: 'This account uses Google Sign-In. Please click "Sign in with Google".' });
         }
@@ -316,14 +283,19 @@ const login = async (req, res) => {
         // Get role-specific data
         let roleData = null;
         if (user.role === 'CLIENT') {
-            roleData = await Client.findOne({ userId: user._id }).populate('areaId').lean();
+            roleData = await Client.findOne({ userId: user._id });
+            if (roleData && roleData.area_id) {
+                const Area = require('../models/Area');
+                roleData.areaId = await Area.findById(roleData.area_id);
+            }
             const Subscription = require('../models/Subscription');
-            const subscription = await Subscription.findOne({ clientId: roleData._id });
+            const subscription = await Subscription.findOne({ clientId: roleData?._id });
             if (subscription) roleData.subscription = subscription;
         } else if (user.role === 'WORKER') {
-            roleData = await Worker.findOne({ userId: user._id }).populate('areaIds serviceIds').lean();
+            roleData = await Worker.findOne({ userId: user._id });
+            if (roleData) await Worker.populate(roleData, ['areaIds', 'serviceIds']);
         } else if (user.role === 'PROVIDER') {
-            roleData = await Provider.findOne({ userId: user._id }).lean();
+            roleData = await Provider.findOne({ userId: user._id });
         }
 
         const token = jwt.sign(
@@ -332,7 +304,7 @@ const login = async (req, res) => {
             { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
         );
 
-        const userResponse = user.toObject();
+        const userResponse = { ...user };
         delete userResponse.password;
 
         if (user.role === 'CLIENT') userResponse.client = roleData;
@@ -350,19 +322,13 @@ const login = async (req, res) => {
 // GOOGLE AUTH
 // ═════════════════════════════════════════════════════════════════
 
-/**
- * Google OAuth
- * POST /api/auth/google
- */
 const googleAuth = async (req, res) => {
     try {
         const { credential, role } = req.body;
-
         if (!credential) {
             return res.status(400).json({ success: false, message: 'Google credential is required' });
         }
 
-        // Verify the Google ID token
         const { OAuth2Client } = require('google-auth-library');
         const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
         const ticket = await client.verifyIdToken({
@@ -377,34 +343,22 @@ const googleAuth = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Could not get email from Google account' });
         }
 
-        // Check if user exists by googleId or email
         let user = await User.findOne({ $or: [{ googleId }, { email }] });
 
         if (user) {
-            // Existing user — link Google if not already linked
-            if (!user.googleId) {
+            if (!user.googleId && !user.google_id) {
+                await User.updateById(user._id, { googleId });
                 user.googleId = googleId;
-                await user.save();
             }
         } else {
-            // New user — create account
             const selectedRole = (role || 'CLIENT').toUpperCase();
             if (!['CLIENT', 'WORKER', 'PROVIDER'].includes(selectedRole)) {
                 return res.status(400).json({ success: false, message: 'Invalid role' });
             }
 
-            // Generate a unique phone placeholder (Google doesn't provide phone)
             const uniquePhone = `G${Date.now()}`;
+            user = await User.create({ email, name: name || email.split('@')[0], phone: uniquePhone, role: selectedRole, googleId });
 
-            user = await User.create({
-                email,
-                name: name || email.split('@')[0],
-                phone: uniquePhone,
-                role: selectedRole,
-                googleId,
-            });
-
-            // Create role-specific profile
             if (selectedRole === 'CLIENT') {
                 await Client.create({ userId: user._id });
             } else if (selectedRole === 'WORKER') {
@@ -417,11 +371,16 @@ const googleAuth = async (req, res) => {
         // Get role-specific data
         let roleData = null;
         if (user.role === 'CLIENT') {
-            roleData = await Client.findOne({ userId: user._id }).populate('areaId').lean();
+            roleData = await Client.findOne({ userId: user._id });
+            if (roleData && roleData.area_id) {
+                const Area = require('../models/Area');
+                roleData.areaId = await Area.findById(roleData.area_id);
+            }
         } else if (user.role === 'WORKER') {
-            roleData = await Worker.findOne({ userId: user._id }).populate('areaIds serviceIds').lean();
+            roleData = await Worker.findOne({ userId: user._id });
+            if (roleData) await Worker.populate(roleData, ['areaIds', 'serviceIds']);
         } else if (user.role === 'PROVIDER') {
-            roleData = await Provider.findOne({ userId: user._id }).lean();
+            roleData = await Provider.findOne({ userId: user._id });
         }
 
         const token = jwt.sign(
@@ -430,7 +389,7 @@ const googleAuth = async (req, res) => {
             { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
         );
 
-        const userResponse = user.toObject();
+        const userResponse = { ...user };
         delete userResponse.password;
 
         if (user.role === 'CLIENT') userResponse.client = roleData;
@@ -439,7 +398,7 @@ const googleAuth = async (req, res) => {
 
         res.json({
             success: true,
-            message: user.createdAt === user.updatedAt ? 'Account created with Google' : 'Login successful',
+            message: user.created_at === user.updated_at ? 'Account created with Google' : 'Login successful',
             data: { user: userResponse, token }
         });
     } catch (error) {
@@ -452,10 +411,6 @@ const googleAuth = async (req, res) => {
 // OTHER
 // ═════════════════════════════════════════════════════════════════
 
-/**
- * Get Current User
- * GET /api/auth/me
- */
 const getCurrentUser = async (req, res) => {
     try {
         const user = { ...req.user };
@@ -467,22 +422,8 @@ const getCurrentUser = async (req, res) => {
     }
 };
 
-/**
- * Logout
- * POST /api/auth/logout
- */
 const logout = async (req, res) => {
     res.json({ success: true, message: 'Logged out successfully' });
 };
 
-module.exports = {
-    sendOtp,
-    verifyOtp,
-    signupClient,
-    signupWorker,
-    signupProvider,
-    login,
-    googleAuth,
-    getCurrentUser,
-    logout
-};
+module.exports = { sendOtp, verifyOtp, signupClient, signupWorker, signupProvider, login, googleAuth, getCurrentUser, logout };

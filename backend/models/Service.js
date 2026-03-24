@@ -1,35 +1,53 @@
-const mongoose = require('mongoose');
+const { supabase } = require('../config/supabase');
 
-const serviceSchema = new mongoose.Schema({
-    name: {
-        type: String,
-        required: true,
-        unique: true,   // Already indexed automatically
-        trim: true
+const mapRow = (row) => {
+    if (!row) return null;
+    return { ...row, _id: row.id, isActive: row.is_active, basePrice: row.base_price };
+};
+const mapRows = (rows) => (rows || []).map(mapRow);
+
+module.exports = {
+    async findById(id) {
+        const { data, error } = await supabase.from('services').select('*').eq('id', id).single();
+        if (error && error.code === 'PGRST116') return null;
+        if (error) throw error;
+        return mapRow(data);
     },
-    description: {
-        type: String,
-        trim: true
+
+    async find(filters = {}) {
+        let q = supabase.from('services').select('*');
+        if (filters.isActive !== undefined || filters.is_active !== undefined) {
+            q = q.eq('is_active', filters.isActive !== undefined ? filters.isActive : filters.is_active);
+        }
+        q = q.order('name', { ascending: true });
+        const { data, error } = await q;
+        if (error) throw error;
+        return mapRows(data);
     },
-    icon: {
-        type: String,
-        trim: true
+
+    async create(serviceData) {
+        const row = {
+            name: serviceData.name,
+            description: serviceData.description || null,
+            icon: serviceData.icon || null,
+            base_price: serviceData.basePrice || null
+        };
+        const { data, error } = await supabase.from('services').insert(row).select().single();
+        if (error) {
+            if (error.code === '23505') {
+                const e = new Error('Duplicate');
+                e.code = 11000;
+                throw e;
+            }
+            throw error;
+        }
+        return mapRow(data);
     },
-    isActive: {
-        type: Boolean,
-        default: true
-    },
-    basePrice: {
-        type: Number,
-        min: 0
+
+    async findByIds(ids) {
+        if (!ids || ids.length === 0) return [];
+        const { data, error } = await supabase.from('services').select('*').in('id', ids);
+        if (error) throw error;
+        return mapRows(data);
     }
-}, {
-    timestamps: true
-});
-
-// Index only non-unique fields
-serviceSchema.index({ isActive: 1 });
-
-const Service = mongoose.model('Service', serviceSchema);
-
-module.exports = Service;
+};

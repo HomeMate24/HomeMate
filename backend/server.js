@@ -3,17 +3,10 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const morgan = require('morgan');
-const connectDB = require('./config/database');
 const { apiLimiter } = require('./middleware/rateLimiter');
 const routes = require('./routes');
 const { initializeWebSocket } = require('./websocket/websocket');
 const { startExpiryChecker } = require('./jobs/expiryChecker');
-
-// Initialize MongoDB connection (optional in development)
-connectDB().catch(err => {
-    console.error('Database initialization failed:', err.message);
-});
-
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -22,20 +15,14 @@ const PORT = process.env.PORT || 5000;
 // MIDDLEWARE
 // ============================================
 
-// CORS configuration
 app.use(cors({
     origin: process.env.FRONTEND_URL || '*',
     credentials: true
 }));
 
-// Request logging
 app.use(morgan('dev'));
-
-// Body parsing
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Rate limiting
 app.use('/api', apiLimiter);
 
 // ============================================
@@ -57,33 +44,14 @@ app.use('/api', routes);
 // ERROR HANDLING
 // ============================================
 
-// Global error handler
 app.use((err, req, res, next) => {
     console.error('Global error handler:', err);
 
-    // MongoDB/Mongoose errors
-    if (err.name === 'MongoError' || err.name === 'MongoServerError') {
+    // Supabase / PostgreSQL errors
+    if (err.code && err.code.startsWith('PGRST') || err.code === '23505' || err.code === '23503') {
         return res.status(400).json({
             success: false,
             message: 'Database operation failed',
-            error: process.env.NODE_ENV === 'development' ? err.message : undefined
-        });
-    }
-
-    // Mongoose validation errors
-    if (err.name === 'ValidationError') {
-        return res.status(400).json({
-            success: false,
-            message: 'Validation failed',
-            errors: Object.values(err.errors).map(e => e.message)
-        });
-    }
-
-    // Duplicate key errors
-    if (err.code === 11000) {
-        return res.status(400).json({
-            success: false,
-            message: 'Duplicate entry found',
             error: process.env.NODE_ENV === 'development' ? err.message : undefined
         });
     }
@@ -108,13 +76,10 @@ app.use((err, req, res, next) => {
 // SERVER INITIALIZATION
 // ============================================
 
-// Create HTTP server
 const server = http.createServer(app);
 
-// Initialize WebSocket
 initializeWebSocket(server);
 
-// Start server
 server.listen(PORT, () => {
     console.log('╔════════════════════════════════════════╗');
     console.log('║     HomeMate Hub Backend Server       ║');
@@ -123,13 +88,12 @@ server.listen(PORT, () => {
     console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🌐 API Base URL: http://localhost:${PORT}/api`);
     console.log(`🔌 WebSocket URL: ws://localhost:${PORT}?token=YOUR_JWT_TOKEN`);
+    console.log(`🗄️  Database: Supabase (PostgreSQL)`);
     console.log('═══════════════════════════════════════════\n');
 
-    // Start background job for checking expired requests
     startExpiryChecker();
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
     console.log('SIGTERM signal received: closing HTTP server');
     server.close(() => {
