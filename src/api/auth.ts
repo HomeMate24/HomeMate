@@ -1,5 +1,5 @@
-// API Base URL
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+// API Base URL - in production, use relative /api (Vercel proxy rewrites to Render backend)
+const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:5000/api' : '/api';
 
 // Helper function to get auth token
 const getAuthToken = () => {

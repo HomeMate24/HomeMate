@@ -63,7 +63,7 @@ export function AddWorkerDialog({ open, onOpenChange, onWorkerAdded }: AddWorker
         try {
             // Search in chat API (reusing existing search functionality)
             const response = await fetch(
-                `${import.meta.env.VITE_API_URL || 'http://localhost:5000/api'}/chat/search?q=${encodeURIComponent(email)}`,
+                `${import.meta.env.DEV ? 'http://localhost:5000/api' : '/api'}/chat/search?q=${encodeURIComponent(email)}`,
                 {
                     headers: {
                         'Authorization': `Bearer ${localStorage.getItem('jwt-token')}`,

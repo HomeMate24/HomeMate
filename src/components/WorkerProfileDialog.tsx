@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Star, Phone, Mail, MapPin, Briefcase, Loader2 } from 'lucide-react';
 
 // Uses role-agnostic endpoint so both clients AND providers can view worker profiles
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.DEV ? 'http://localhost:5000/api' : '/api';
 const fetchWorkerPublicProfile = async (workerId: string) => {
     const token = localStorage.getItem('jwt-token');
     const res = await fetch(`${API_BASE_URL}/workers/${workerId}/public-profile`, {
