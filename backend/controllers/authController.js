@@ -12,14 +12,29 @@ let _transporter = null;
 const getTransporter = () => {
     if (!_transporter) {
         _transporter = nodemailer.createTransport({
-            service: 'gmail',
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
             auth: {
                 user: process.env.SMTP_EMAIL,
                 pass: process.env.SMTP_PASSWORD,
             },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 15000,
         });
     }
     return _transporter;
+};
+
+// Helper: sendMail with a hard timeout to prevent hanging
+const sendMailWithTimeout = (transporter, mailOptions, timeoutMs = 20000) => {
+    return Promise.race([
+        transporter.sendMail(mailOptions),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Email sending timed out')), timeoutMs)
+        ),
+    ]);
 };
 
 // ─── Helper: verify OTP token ──────────────────────────────────
@@ -42,21 +57,25 @@ const sendOtp = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Email is required' });
         }
 
+        console.log('[OTP] Generating OTP for:', email);
         const otp = String(Math.floor(100000 + Math.random() * 900000));
 
         // Remove any old OTPs for this email
+        console.log('[OTP] Deleting old OTPs...');
         await OtpCode.deleteMany({ email: email.toLowerCase() });
 
         // Save new OTP
+        console.log('[OTP] Saving new OTP...');
         await OtpCode.create({
             email: email.toLowerCase(),
             otp,
             expiresAt: new Date(Date.now() + 5 * 60 * 1000),
         });
 
-        // Send email
+        // Send email with timeout
+        console.log('[OTP] Sending email via SMTP...');
         const transporter = getTransporter();
-        await transporter.sendMail({
+        await sendMailWithTimeout(transporter, {
             from: `"HomeMate" <${process.env.SMTP_EMAIL}>`,
             to: email,
             subject: 'Your HomeMate Verification Code',
@@ -73,10 +92,11 @@ const sendOtp = async (req, res) => {
             `,
         });
 
+        console.log('[OTP] Email sent successfully to:', email);
         res.json({ success: true, message: 'OTP sent to your email' });
     } catch (error) {
-        console.error('Send OTP error:', error);
-        res.status(500).json({ success: false, message: 'Failed to send OTP. Check your email and try again.' });
+        console.error('Send OTP error:', error.message, error.stack);
+        res.status(500).json({ success: false, message: error.message || 'Failed to send OTP. Check your email and try again.' });
     }
 };
 
